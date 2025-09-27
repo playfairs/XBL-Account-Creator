@@ -1,0 +1,9 @@
+- [x] Automate Email Element
+- [x] Automate Password Element
+- [x] Automate Name Element
+- [ ] Automate Date of Birth Element
+- [ ] Automate CAPTCHA Element
+- [ ] Automate Profile Element
+- [ ] Automate Optional Diagnostic Element
+- [ ] Fetch XSTS Tokens (XBL3.0) and store them
+- [ ] Sign out, and Restart the process

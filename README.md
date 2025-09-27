@@ -8,10 +8,10 @@ You can however make a pull request if you would like to contribute to the tool,
 
 This tool (made with Electron) is a simple JavaScript tool which automates the process of creation Xbox Accounts through the Microsoft website, it then stores all the tokens of the accounts it creates into a .txt file which can then be used elsewhere which require these tokens to function, tools like Xbox Live follower bots, which I so happen to have made one, you can check it out [here](https://github.com/playfairs/XBL-Follower-Bot)
 
->[!PERQUISITES]
-
+>[!NOTE]
++
 In order for this tool to work you must have the following installed.
 
-- Node.JS with NPM
-- Electron
-
+- NPM v10 or higher
+- Node.JS v22 or higher (with NPM)
+- Electron v29 or higher
