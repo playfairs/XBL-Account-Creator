@@ -10,7 +10,6 @@ This tool (made with Electron) is a simple JavaScript tool which automates the p
 
 >[!NOTE]
 In order for this tool to work you must have the following installed.
-
 - NPM v10 or higher
 - Node.JS v22 or higher (with NPM)
 - Electron v29 or higher
