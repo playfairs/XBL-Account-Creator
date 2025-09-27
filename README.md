@@ -2,7 +2,7 @@
 
 >[!IMPORTANT]
 This tool does not yet work and still needs to be finished before it can function properly, do not use this until this note is removed.
-You can however make a pull request if you would like to contribute to the tool, contact @playfairs for any information or questions.
+You can however make a pull request if you would like to contribute to the tool, contact [@playfairs](https://discord.com/users/785042666475225109) for any information or questions.
 
 ## What is this tool?
 
@@ -13,3 +13,4 @@ In order for this tool to work you must have the following installed
 > - NPM v10 or higher
 > - Node.JS v22 or higher (with NPM)
 > - Electron v29 or higher
+
