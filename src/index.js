@@ -1,556 +1,769 @@
-const { appendFileSync } = require("node:fs");
+/**
+ * This is a rewritten version of a different tool, which was used to create SINGLE accounts per run.
+ *
+ *   Rewritten to:
+ * - Speed up password detection/fill by using a persisted selector cache.
+ * - getPage quick-checks persisted selector(s) before doing broad scans.
+ * - When on the "Create a password" page, injects a renderer-side MutationObserver
+ *   script that will fill the password immediately when the input appears (fast-path).
+ *
+ * Notes:
+ * - This file is intended to run under Electron in the main process.
+ * - It uses simple file-based persistence (selectors.json) for discovered selectors.
+ */
+
+const {
+  appendFileSync,
+  readFileSync,
+  writeFileSync,
+  existsSync,
+} = require("fs");
+const path = require("path");
 const electron = require("electron");
 
-(async () => {
-    electron.app.on("ready", async () => {
-        const mainWindow = new electron.BrowserWindow({
-            width: 1000,
-            height: 800,
-            webPreferences: {
-                nodeIntegration: true,
-                partition: "persist:main",
-            }
-        });
+const SELECTORS_FILE = path.join(__dirname, "..", "selectors.json");
+const ACCOUNTS_FILE = path.join(__dirname, "..", "accounts.txt");
 
-        mainWindow.loadURL("https://www.xbox.com/en-CA/auth/msa?action=logIn&returnUrl=https%3A%2F%2Fwww.xbox.com%2Fen-CA%2F");
-        let currentAccount = { email: "", password: "" };
-        let lastTitle;
-        
-        setInterval(async () => {
-            try {
-                const title = await getPage(mainWindow);
-                if (title === lastTitle || title === "Unknown") return;
-                lastTitle = title;
-                console.log(title);
-                
-                switch (title) {
-                    case "Xbox Official Site: Consoles, Games, and Community | Xbox":
-                        mainWindow.loadURL("https://www.xbox.com/en-CA/auth/msa?action=logIn&returnUrl=https%3A%2F%2Fwww.xbox.com%2Fen-CA%2F");
-                        break;
-                    case "Sign in to your Microsoft account":
-                        await new Promise((resolve) => setTimeout(resolve, 1000));
-                        await tryMultipleSelectors(mainWindow, ["#signup", "#i0116"], `document.querySelector('SELECTOR').click()`);
-                        break;
-                    case "Create account":
-                        console.log("=== DOM INSPECTION FOR CREATE ACCOUNT PAGE ===");
-                        
-                        await new Promise(resolve => setTimeout(resolve, 2000));
-                        
-                        await inspectDOM(mainWindow);
-                        
-                        try {
-                            const hasError = await mainWindow.webContents.executeJavaScript(`
-                                Boolean(document.querySelector('[role="alert"]')) || 
-                                Boolean(document.querySelector('.error')) || 
-                                document.body.textContent.includes('email address is required')
-                            `);
-                            
-                            if (hasError) {
-                                console.log("Email validation error detected, retrying email input...");
-                            }
-                        } catch (error) {
-                            console.log("Could not check for errors, continuing...");
-                        }
-                        
-                        await new Promise(resolve => setTimeout(resolve, 1000));
-                        
-                        const numbers = new Array(10).fill(0).map(() => Math.floor(Math.random() * 10)).join("");
-                        const letters = new Array(5).fill(0).map(() => String.fromCharCode(Math.floor(Math.random() * 26) + 97)).join("");
-                        currentAccount.email = `${letters}${numbers}@outlook.com`;
-                        
-                        const email = currentAccount.email;
-                        
-                        await waitForElementAndExecute(mainWindow, "#usernameInput", `
-                            const input = document.querySelector('#usernameInput');
-                            input.focus();
-                            input.click();
-                        `);
-                        
-                        await new Promise(resolve => setTimeout(resolve, 500));
-                        
-                        for (let i = 0; i < 50; i++) {
-                            mainWindow.webContents.sendInputEvent({
-                                type: 'keyDown',
-                                keyCode: 'Backspace'
-                            });
-                            mainWindow.webContents.sendInputEvent({
-                                type: 'keyUp',
-                                keyCode: 'Backspace'
-                            });
-                        }
-                        
-                        for (let char of email) {
-                            mainWindow.webContents.sendInputEvent({
-                                type: 'char',
-                                keyCode: char
-                            });
-                            await new Promise(resolve => setTimeout(resolve, 50));
-                        }
-                        
-                        await new Promise(resolve => setTimeout(resolve, 1000));
-                        
-                        await new Promise(resolve => setTimeout(resolve, 2000));
-                        
-                        try {
-                            const finalValue = await mainWindow.webContents.executeJavaScript(`document.querySelector('#usernameInput').value`);
-                            console.log(`Final input value before clicking Next: ${finalValue}`);
-                            
-                            if (!finalValue || finalValue.trim() === '') {
-                                console.log("Email was cleared, trying to set it again...");
-                                await waitForElementAndExecute(mainWindow, "#usernameInput", `
-                                    const input = document.querySelector('#usernameInput');
-                                    input.focus();
-                                    input.value = '${currentAccount.email}';
-                                    input.dispatchEvent(new Event('input', { bubbles: true }));
-                                `);
-                                await new Promise(resolve => setTimeout(resolve, 1000));
-                            }
-                        } catch (error) {
-                            console.log("Could not verify input value before clicking");
-                        }
-                        
-                        await waitForElementAndExecute(mainWindow, "#nextButton", `document.querySelector('#nextButton').click()`);
-                        
-                        console.log(`Created email: ${currentAccount.email}`);
-                        break;
-                    case "Create a password":
-                        const password = [2, 2, 2, 2].map((length, index) => {
-                            switch (index) {
-                                case 0:
-                                    return new Array(length).fill(0).map(() => String.fromCharCode(Math.floor(Math.random() * 26) + 97)).join("");
-                                case 1:
-                                    return new Array(length).fill(0).map(() => String.fromCharCode(Math.floor(Math.random() * 26) + 65)).join("");
-                                case 2:
-                                    return new Array(length).fill(0).map(() => Math.floor(Math.random() * 10)).join("");
-                                case 3:
-                                    return new Array(length).fill(0).map(() => String.fromCharCode(Math.floor(Math.random() * 15) + 33)).join("");
-                            }
-                        }).join("");
-                        
-                        console.log(`Created password: ${password}`)
-                        currentAccount.password = password;
-                        await new Promise((r) => setTimeout(r, 1000));
-                        
-                        await waitForElementAndExecute(mainWindow, "#Password", `
-                            const input = document.querySelector('#Password');
-                            input.focus();
-                            input.click();
-                        `);
-                        
-                        await new Promise(resolve => setTimeout(resolve, 500));
-                        
-                        for (let i = 0; i < 50; i++) {
-                            mainWindow.webContents.sendInputEvent({
-                                type: 'keyDown',
-                                keyCode: 'Backspace'
-                            });
-                            mainWindow.webContents.sendInputEvent({
-                                type: 'keyUp',
-                                keyCode: 'Backspace'
-                            });
-                        }
-                        
-                        for (let char of password) {
-                            mainWindow.webContents.sendInputEvent({
-                                type: 'char',
-                                keyCode: char
-                            });
-                            await new Promise(resolve => setTimeout(resolve, 50));
-                        }
-                        
-                        await new Promise(resolve => setTimeout(resolve, 1000));
-                        
-                        await new Promise(resolve => setTimeout(resolve, 2000));
-                        
-                        try {
-                            const finalValue = await mainWindow.webContents.executeJavaScript(`document.querySelector('#Password').value`);
-                            console.log(`Final password value before clicking Next: ${finalValue ? '[HIDDEN]' : 'EMPTY'}`);
-                            
-                            if (!finalValue || finalValue.trim() === '') {
-                                console.log("Password was cleared, trying to set it again...");
-                                await waitForElementAndExecute(mainWindow, "#Password", `
-                                    const input = document.querySelector('#Password');
-                                    input.focus();
-                                    input.value = '${password}';
-                                    input.dispatchEvent(new Event('input', { bubbles: true }));
-                                `);
-                                await new Promise(resolve => setTimeout(resolve, 1000));
-                            }
-                        } catch (error) {
-                            console.log("Could not verify password value before clicking");
-                        }
-                        
-                        await waitForElementAndExecute(mainWindow, "#nextButton", `document.querySelector('#nextButton').click()`);
-                        break;
-                    case "What's your name?":
-                        console.log("=== DOM INSPECTION FOR NAME PAGE ===");
-                        
-                        await new Promise(resolve => setTimeout(resolve, 2000));
-                        await new Promise(resolve => setTimeout(resolve, 2000));
-                        
-                        await inspectDOM(mainWindow);
-                        
-                        const firstNames = ["Alex", "Jordan", "Taylor", "Casey", "Riley", "Morgan", "Avery", "Quinn", "Sage", "River"];
-                        const lastNames = ["Smith", "Johnson", "Brown", "Davis", "Miller", "Wilson", "Moore", "Taylor", "Anderson", "Thomas"];
-                        const firstName = firstNames[Math.floor(Math.random() * firstNames.length)];
-                        const lastName = lastNames[Math.floor(Math.random() * lastNames.length)];
-                        
-                        console.log(`Generated names: ${firstName} ${lastName}`);
-                        
-                        console.log("Typing first name...");
-                        
-                        await waitForElementAndExecute(mainWindow, "#firstNameInput", `
-                            const input = document.querySelector('#firstNameInput');
-                            input.focus();
-                            input.click();
-                        `);
-                        
-                        await new Promise(resolve => setTimeout(resolve, 500));
-                        
-                        for (let i = 0; i < 20; i++) {
-                            mainWindow.webContents.sendInputEvent({
-                                type: 'keyDown',
-                                keyCode: 'Backspace'
-                            });
-                            mainWindow.webContents.sendInputEvent({
-                                type: 'keyUp',
-                                keyCode: 'Backspace'
-                            });
-                        }
-                        
-                        for (let char of firstName) {
-                            mainWindow.webContents.sendInputEvent({
-                                type: 'char',
-                                keyCode: char
-                            });
-                            await new Promise(resolve => setTimeout(resolve, 50));
-                        }
-                        
-                        console.log(`First name "${firstName}" typed successfully`);
-                        
-                        await new Promise(resolve => setTimeout(resolve, 500));
-                        mainWindow.webContents.sendInputEvent({
-                            type: 'keyDown',
-                            keyCode: 'Tab'
-                        });
-                        mainWindow.webContents.sendInputEvent({
-                            type: 'keyUp',
-                            keyCode: 'Tab'
-                        });
-                        console.log("Pressed Tab to move to last name field");
-                        
-                        await new Promise(resolve => setTimeout(resolve, 1000));
-                        
-                        console.log("Typing last name...");
-                        
-                        for (let char of lastName) {
-                            mainWindow.webContents.sendInputEvent({
-                                type: 'char',
-                                keyCode: char
-                            });
-                            await new Promise(resolve => setTimeout(resolve, 50));
-                        }
-                        
-                        console.log(`Last name "${lastName}" typed successfully`);
-                        
-                        await new Promise(resolve => setTimeout(resolve, 500));
-                        mainWindow.webContents.sendInputEvent({
-                            type: 'keyDown',
-                            keyCode: 'Return'
-                        });
-                        mainWindow.webContents.sendInputEvent({
-                            type: 'keyUp',
-                            keyCode: 'Return'
-                        });
-                        console.log("Pressed Enter to submit form");
-                        
-                        await new Promise(resolve => setTimeout(resolve, 1000));
-                        
-                        await waitForElementAndExecute(mainWindow, "#nextButton", `document.querySelector('#nextButton').click()`);
-                        break;
-                    case `What's your date of birth?`:
-                        await tryMultipleSelectors(mainWindow, ["#BirthMonth", "#BirthMonth_DropDown"], `document.querySelector('SELECTOR').value = "${Math.max(1, Math.floor(Math.random() * 12))}";`);
-                        await new Promise(resolve => setTimeout(resolve, 500));
-                        await tryMultipleSelectors(mainWindow, ["#BirthMonth", "#BirthMonth_DropDown"], `document.querySelector('SELECTOR').dispatchEvent(new Event("change"));`);
-                        
-                        await new Promise(resolve => setTimeout(resolve, 1000));
-                        
-                        await tryMultipleSelectors(mainWindow, ["#BirthDay", "#BirthDay_DropDown"], `document.querySelector('SELECTOR').value = "${Math.max(1, Math.floor(Math.random() * 15))}";`);
-                        await new Promise(resolve => setTimeout(resolve, 500));
-                        await tryMultipleSelectors(mainWindow, ["#BirthDay", "#BirthDay_DropDown"], `document.querySelector('SELECTOR').dispatchEvent(new Event("change"));`);
-                        
-                        await new Promise(resolve => setTimeout(resolve, 1000));
-                        
-                        await tryMultipleSelectors(mainWindow, ["#BirthYear", "#BirthYear_DropDown"], `document.querySelector('SELECTOR').value = "1995";`);
-                        await new Promise(resolve => setTimeout(resolve, 500));
-                        await tryMultipleSelectors(mainWindow, ["#BirthYear", "#BirthYear_DropDown"], `document.querySelector('SELECTOR').dispatchEvent(new Event("input"));`);
-                        
-                        await new Promise(resolve => setTimeout(resolve, 2000));
-                        await new Promise(resolve => setTimeout(resolve, 2000));
-                        
-                        try {
-                            const fieldValues = await mainWindow.webContents.executeJavaScript(`
-                                const month = document.querySelector('#BirthMonth');
-                                const day = document.querySelector('#BirthDay');
-                                const year = document.querySelector('#BirthYear');
-                                return {
-                                    month: month ? month.value : 'not found',
-                                    day: day ? day.value : 'not found',
-                                    year: year ? year.value : 'not found'
-                                };
-                            `);
-                            console.log('Birth date field values before Next:', fieldValues);
-                        } catch (error) {
-                            console.log('Could not verify field values:', error.message);
-                        }
-                        
-                        console.log('Attempting to click Next button...');
-                        try {
-                            const clickResult = await mainWindow.webContents.executeJavaScript(`
-                                const nextButton = document.querySelector('#nextButton');
-                                if (nextButton) {
-                                    nextButton.click();
-                                    return 'Next button clicked';
-                                } else {
-                                    return 'Next button not found';
-                                }
-                            `);
-                            console.log('Next button click result:', clickResult);
-                        } catch (error) {
-                            console.log('Next button click error:', error.message);
-                        }
-                        
-                        await new Promise(resolve => setTimeout(resolve, 3000));
-                        try {
-                            const currentTitle = await mainWindow.webContents.executeJavaScript(`document.title`);
-                            console.log('Current page title after Next click:', currentTitle);
-                            
-                            if (currentTitle.includes('birthdate')) {
-                                console.log('STILL ON BIRTH DATE PAGE - checking field values after click');
-                                const postClickValues = await mainWindow.webContents.executeJavaScript(`
-                                    const month = document.querySelector('#BirthMonth');
-                                    const day = document.querySelector('#BirthDay');
-                                    const year = document.querySelector('#BirthYear');
-                                    return {
-                                        month: month ? month.value : 'not found',
-                                        day: day ? day.value : 'not found',
-                                        year: year ? year.value : 'not found'
-                                    };
-                                `);
-                                console.log('Field values after Next click:', postClickValues);
-                            } else {
-                                console.log('Successfully moved to next page:', currentTitle);
-                            }
-                        } catch (error) {
-                            console.log('Could not check page after Next click:', error.message);
-                        }
-                        break;
-                    case "Help us beat the robots":
-                        console.log("Handling accessibility challenge page...");
-                        
-                        console.log("Looking for Accessibility Challenge button...");
-                        const accessibilityResult = await waitForElementAndExecute(mainWindow, "button", `
-                            const buttons = Array.from(document.querySelectorAll('button'));
-                            const accessibilityButton = buttons.find(btn => 
-                                btn.textContent && btn.textContent.toLowerCase().includes('accessibility challenge')
-                            );
-                            if (accessibilityButton) {
-                                accessibilityButton.click();
-                                console.log('Clicked Accessibility Challenge button');
-                                return true;
-                            }
-                            return false;
-                        `);
-                        
-                        if (accessibilityResult) {
-                            console.log("Accessibility Challenge button clicked, waiting 5-10 seconds...");
-                            const waitTime = Math.floor(Math.random() * 5000) + 5000; // 5-10 seconds
-                            await new Promise(resolve => setTimeout(resolve, waitTime));
-                            
-                            console.log("Looking for Press Again button...");
-                            const pressAgainResult = await waitForElementAndExecute(mainWindow, "button", `
-                                const buttons = Array.from(document.querySelectorAll('button'));
-                                const pressAgainButton = buttons.find(btn => 
-                                    btn.textContent && btn.textContent.toLowerCase().includes('press again')
-                                );
-                                if (pressAgainButton) {
-                                    pressAgainButton.click();
-                                    console.log('Clicked Press Again button');
-                                    return true;
-                                }
-                                return false;
-                            `);
-                            
-                            if (!pressAgainResult) {
-                                console.log("Press Again button not found, trying alternative selectors...");
-                                await tryMultipleSelectors(mainWindow, ["button[aria-label*='again']", "button[title*='again']", "input[value*='again']"], `document.querySelector('SELECTOR').click();`);
-                            }
-                        } else {
-                            console.log("Accessibility Challenge button not found, trying alternative approaches...");
-                            await tryMultipleSelectors(mainWindow, ["button[aria-label*='accessibility']", "button[title*='accessibility']", "input[value*='accessibility']"], `document.querySelector('SELECTOR').click();`);
-                        }
-                        break;
-                    case "Microsoft account notice":
-                        await new Promise((r) => setTimeout(r, 1000));
-                        await tryMultipleSelectors(mainWindow, ["#StickyFooter > button", "#idSubmit_SAOTCS_Confirm"], `document.querySelector('SELECTOR').click();`);
-                        break;
-                    case "Welcome to Xbox":
-                        appendFileSync(__dirname + "/../accounts.txt", `${currentAccount.email}:${currentAccount.password}\n`);
-                        console.log(`Account created: ${currentAccount.email}:${currentAccount.password}`);
-                        await new Promise((r) => setTimeout(r, 2000));
-                        await tryMultipleSelectors(mainWindow, ["#create-account-gamertag-suggestion-1", "#create-account-gamertag-suggestion-1"], `document.querySelector('SELECTOR').click();`);
-                        await new Promise((r) => setTimeout(r, 2000));
-                        await tryMultipleSelectors(mainWindow, ["#inline-continue-control", "#idSubmit_SAOTCS_Confirm"], `document.querySelector('SELECTOR').click();`);
-                        break;
-                    case "Consent":
-                        await new Promise((r) => setTimeout(r, 1000));
-                        await tryMultipleSelectors(mainWindow, ["#inline-continue-control", "#idSubmit_SAOTCS_Confirm"], `document.querySelector('SELECTOR').click();`);
-                        break;
-                }
-            } catch (error) {
-                console.error(`Error in main loop: ${error.message}`);
-            }
-        }, 250);
-    });
-})().catch(error => {
-    console.error(`Application error: ${error.message}`);
-});
-
-const executeJavaScriptSafely = async (mainWindow, script) => {
-    try {
-        return await mainWindow.webContents.executeJavaScript(script);
-    } catch (error) {
-        console.error(`JavaScript execution failed: ${error.message}`);
-        console.error(`Script: ${script}`);
-        return null;
-    }
-};
-
-const waitForElementAndExecute = async (mainWindow, selector, action, maxRetries = 5) => {
-    for (let i = 0; i < maxRetries; i++) {
-        try {
-            const elementExists = await mainWindow.webContents.executeJavaScript(
-                `Boolean(document.querySelector("${selector}"))`
-            );
-            
-            if (elementExists) {
-                const result = await mainWindow.webContents.executeJavaScript(action);
-                console.log(`Successfully executed: ${action}`);
-                return result;
-            } else {
-                console.log(`Element not found (attempt ${i + 1}/${maxRetries}): ${selector}`);
-                await new Promise(resolve => setTimeout(resolve, 500));
-            }
-        } catch (error) {
-            console.error(`Error waiting for element ${selector}: ${error.message}`);
-            await new Promise(resolve => setTimeout(resolve, 500));
-        }
-    }
-    console.error(`Failed to find element after ${maxRetries} attempts: ${selector}`);
-    return null;
-};
-
-const tryMultipleSelectors = async (mainWindow, selectors, action) => {
-    for (const selector of selectors) {
-        const result = await waitForElementAndExecute(mainWindow, selector, action.replace('SELECTOR', selector));
-        if (result !== null) {
-            return result;
-        }
-    }
-    console.error(`All selectors failed: ${selectors.join(', ')}`);
-    return null;
-};
-
-const inspectDOM = async (mainWindow) => {
-    try {
-        const isReady = await mainWindow.webContents.executeJavaScript(`document.readyState`);
-        console.log(`Document ready state: ${isReady}`);
-        
-        const hasInputs = await mainWindow.webContents.executeJavaScript(`document.querySelectorAll('input').length`);
-        const hasButtons = await mainWindow.webContents.executeJavaScript(`document.querySelectorAll('button').length`);
-        console.log(`Found ${hasInputs} inputs and ${hasButtons} buttons`);
-        
-        const title = await mainWindow.webContents.executeJavaScript(`document.title`);
-        const url = await mainWindow.webContents.executeJavaScript(`window.location.href`);
-        console.log(`Page: ${title}`);
-        console.log(`URL: ${url}`);
-        
-        const inputs = await mainWindow.webContents.executeJavaScript(`
-            Array.from(document.querySelectorAll('input')).map((el, i) => ({
-                index: i,
-                type: el.type,
-                id: el.id,
-                name: el.name,
-                placeholder: el.placeholder,
-                className: el.className
-            }))
-        `);
-        
-        console.log("Input elements:", inputs);
-        
-        const buttons = await mainWindow.webContents.executeJavaScript(`
-            Array.from(document.querySelectorAll('button')).map((el, i) => ({
-                index: i,
-                type: el.type,
-                id: el.id,
-                className: el.className,
-                textContent: el.textContent?.trim()
-            }))
-        `);
-        
-        console.log("Button elements:", buttons);
-        
-        return { inputs, buttons };
-    } catch (error) {
-        console.error("Failed to inspect DOM:", error.message);
-        return { inputs: [], buttons: [] };
-    }
-};
-
-const getPage = async (mainWindow) => {
-    const pageMap = {
-        "Sign in to your Microsoft account": "#usernameTitle",
-        "Create a password": "input[type=password]",
-        "What's your name?": ["input[placeholder*='First name']", "input[placeholder*='first name']", "#firstNameInput", "#lastNameInput"],
-        "What's your date of birth?": "#BirthMonth",
-        "Microsoft account notice": "#StickyFooter > button",
-        "Welcome to Xbox": "#create-account-gamertag-suggestion-1",
-        "Consent": "#inline-continue-control",
-        "Create account": "#liveSwitch",
-        "Xbox Official Site: Consoles, Games, and Community | Xbox": "#signup",
-        "Add security info": "#hipEnforcementContainer"
-    };
-
-    try {
-        const actualTitle = await mainWindow.webContents.executeJavaScript(`document.title`);
-        console.log(`Actual page title: "${actualTitle}"`);
-        
-        for (let title in pageMap) {
-            const selectors = Array.isArray(pageMap[title]) ? pageMap[title] : [pageMap[title]];
-            
-            for (const selector of selectors) {
-                const element = await mainWindow.webContents.executeJavaScript(`Boolean(document.querySelector("${selector}"))`);
-                if (element) {
-                    console.log(`Page detected as "${title}" using selector: ${selector}`);
-                    return title;
-                }
-            }
-        }
-        
-        console.log("No page detected, checking for common elements...");
-        const hasFirstNameInput = await mainWindow.webContents.executeJavaScript(`
-            Boolean(document.querySelector('input[placeholder*="First name"]') || 
-                   document.querySelector('input[placeholder*="first name"]'))
-        `);
-        
-        if (hasFirstNameInput) {
-            console.log("Found first name input, assuming this is the name page");
-            return "What's your name?";
-        }
-        
-        return "Unknown";
-    } catch (error) {
-        console.error(`Error in getPage: ${error.message}`);
-        return "Unknown";
-    }
+let persistedSelectors = {};
+try {
+  if (existsSync(SELECTORS_FILE)) {
+    const raw = readFileSync(SELECTORS_FILE, "utf8");
+    persistedSelectors = JSON.parse(raw || "{}");
+    console.log("Loaded selector cache:", persistedSelectors);
+  } else {
+    persistedSelectors = {};
+  }
+} catch (err) {
+  console.warn(
+    "Could not load selector cache:",
+    err && err.message ? err.message : err,
+  );
+  persistedSelectors = {};
 }
+
+function persistSelector(key, selector) {
+  try {
+    persistedSelectors[key] = selector;
+    writeFileSync(
+      SELECTORS_FILE,
+      JSON.stringify(persistedSelectors, null, 2),
+      "utf8",
+    );
+    console.log(`Persisted selector for "${key}": ${selector}`);
+  } catch (err) {
+    console.warn(
+      "Failed to persist selector:",
+      err && err.message ? err.message : err,
+    );
+  }
+}
+
+async function execSafe(webContents, script) {
+  try {
+    return await webContents.executeJavaScript(script);
+  } catch (err) {
+    console.warn(
+      "executeJavaScript failed:",
+      err && err.message ? err.message : err,
+    );
+    return null;
+  }
+}
+
+async function waitForElementAndExecute(
+  webContents,
+  selector,
+  actionScript,
+  maxRetries = 5,
+  pollMs = 120,
+) {
+  const checkScript = `(function(){ try { return Boolean(document.querySelector(${JSON.stringify(selector)})); } catch(e) { return false; } })()`;
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      const exists = await webContents.executeJavaScript(checkScript);
+      if (exists) {
+        const res = await webContents.executeJavaScript(actionScript);
+        console.log(`Executed action for ${selector}`);
+        return res;
+      } else {
+        await new Promise((r) => setTimeout(r, pollMs));
+      }
+    } catch (err) {
+      console.warn(
+        `Error while waiting for ${selector}:`,
+        err && err.message ? err.message : err,
+      );
+      await new Promise((r) => setTimeout(r, pollMs));
+    }
+  }
+  console.error(
+    `Failed to find element after ${maxRetries} attempts: ${selector}`,
+  );
+  return null;
+}
+
+async function tryMultipleSelectors(
+  webContents,
+  selectors,
+  action,
+  maxRetriesPer = 4,
+) {
+  for (const selector of selectors) {
+    const replacedAction = action
+      .replace(/'SELECTOR'/g, JSON.stringify(selector))
+      .replace(/"SELECTOR"/g, JSON.stringify(selector))
+      .replace(/\bSELECTOR\b/g, JSON.stringify(selector));
+    const res = await waitForElementAndExecute(
+      webContents,
+      selector,
+      replacedAction,
+      maxRetriesPer,
+    );
+    if (res !== null) return res;
+  }
+  console.error("All selectors failed:", selectors);
+  return null;
+}
+
+async function inspectDOM(webContents) {
+  try {
+    const ready = await execSafe(webContents, "document.readyState");
+    const title = await execSafe(webContents, "document.title");
+    const url = await execSafe(webContents, "window.location.href");
+    const inputs = await execSafe(
+      webContents,
+      `
+      Array.from(document.querySelectorAll('input')).map((el, i) => ({
+        index: i,
+        id: el.id,
+        name: el.name,
+        type: el.type,
+        placeholder: el.placeholder,
+        className: el.className
+      }));
+    `,
+    );
+    const buttons = await execSafe(
+      webContents,
+      `
+      Array.from(document.querySelectorAll('button')).map((el, i) => ({
+        index: i,
+        id: el.id,
+        className: el.className,
+        textContent: el.textContent ? el.textContent.trim() : ''
+      }));
+    `,
+    );
+    console.log("DOM readyState:", ready, "title:", title, "url:", url);
+    console.log("Input elements:", inputs);
+    console.log("Button elements:", buttons);
+    return { ready, title, url, inputs, buttons };
+  } catch (err) {
+    console.warn("inspectDOM failed:", err && err.message ? err.message : err);
+    return { ready: null, title: null, url: null, inputs: [], buttons: [] };
+  }
+}
+
+const PAGE_MAP = {
+  "Sign in to your Microsoft account": "#usernameTitle",
+  "Create a password": "input[type=password]",
+  "What's your name?": [
+    "input[placeholder*='First name']",
+    "input[placeholder*='first name']",
+    "#firstNameInput",
+    "#lastNameInput",
+  ],
+  "What's your date of birth?": "#BirthMonth",
+  "Microsoft account notice": "#StickyFooter > button",
+  "Welcome to Xbox": "#create-account-gamertag-suggestion-1",
+  Consent: "#inline-continue-control",
+  "Create account": "#liveSwitch",
+  "Xbox Official Site: Consoles, Games, and Community | Xbox": "#signup",
+  "Add security info": "#hipEnforcementContainer",
+};
+
+async function getPage(webContents) {
+  try {
+    const actualTitle = await execSafe(webContents, "document.title");
+    if (
+      actualTitle &&
+      actualTitle.toLowerCase().includes("create a password")
+    ) {
+      console.log(
+        'Page title indicates "Create a password" — fast-pathing to password page detection',
+      );
+      return { title: "Create a password", elementInfo: null };
+    }
+    if (persistedSelectors && persistedSelectors["Create a password"]) {
+      try {
+        const sel = persistedSelectors["Create a password"];
+        const elementInfo = await execSafe(
+          webContents,
+          `(function(){ try { const el = document.querySelector(${JSON.stringify(sel)}); if(!el) return null; return { id: el.id || null, name: el.name || null, type: el.type || null, placeholder: el.placeholder || null, className: el.className || null, outerHTML: (el.outerHTML||'').slice(0,1000), suggested: ${JSON.stringify(sel)} }; } catch(e){ return null; } })()`,
+        );
+        if (elementInfo) {
+          console.log(
+            `Quick-detected password page via persisted selector: ${sel}`,
+          );
+          return { title: "Create a password", elementInfo };
+        }
+      } catch (err) {
+        console.warn(
+          "Quick persisted selector check failed:",
+          err && err.message ? err.message : err,
+        );
+      }
+    }
+
+    for (const title of Object.keys(PAGE_MAP)) {
+      const selectors = Array.isArray(PAGE_MAP[title])
+        ? PAGE_MAP[title]
+        : [PAGE_MAP[title]];
+      for (const selector of selectors) {
+        const elementInfo = await execSafe(
+          webContents,
+          `(function(){ try { const sel = ${JSON.stringify(selector)}; const el = document.querySelector(sel); if(!el) return null; return { id: el.id || null, name: el.name || null, type: el.type || null, placeholder: el.placeholder || null, className: el.className || null, outerHTML: (el.outerHTML||'').slice(0,1000), suggested: el.id ? ('#' + el.id) : (el.name ? ('input[name=\"' + el.name + '\"]') : sel) }; } catch(e) { return null; } })()`,
+        );
+        if (elementInfo) {
+          console.log(
+            `Page detected as "${title}" using selector: ${selector}`,
+          );
+          if (title === "Create a password") {
+            return { title, elementInfo };
+          } else {
+            return { title, elementInfo: null };
+          }
+        }
+      }
+    }
+
+    const hasFirstName = await execSafe(
+      webContents,
+      `Boolean(document.querySelector('input[placeholder*="First name"]') || document.querySelector('input[placeholder*="first name"]'))`,
+    );
+    if (hasFirstName) {
+      return { title: "What's your name?", elementInfo: null };
+    }
+
+    return { title: "Unknown", elementInfo: null };
+  } catch (err) {
+    console.error("Error in getPage:", err && err.message ? err.message : err);
+    return { title: "Unknown", elementInfo: null };
+  }
+}
+
+(async () => {
+  electron.app.on("ready", async () => {
+    const mainWindow = new electron.BrowserWindow({
+      width: 1000,
+      height: 800,
+      webPreferences: {
+        nodeIntegration: true,
+        partition: "persist:main",
+      },
+    });
+
+    mainWindow.loadURL(
+      "https://www.xbox.com/en-CA/auth/msa?action=logIn&returnUrl=https%3A%2F%2Fwww.xbox.com%2Fen-CA%2F",
+    );
+
+    let lastTitle = null;
+    let currentAccount = { email: "", password: "" };
+
+    setInterval(async () => {
+      try {
+        const { title, elementInfo } = await getPage(mainWindow.webContents);
+        if (title === lastTitle || title === "Unknown") return;
+        lastTitle = title;
+        console.log("Detected page:", title);
+
+        switch (title) {
+          case "Xbox Official Site: Consoles, Games, and Community | Xbox":
+            mainWindow.loadURL(
+              "https://www.xbox.com/en-CA/auth/msa?action=logIn&returnUrl=https%3A%2F%2Fwww.xbox.com%2Fen-CA%2F",
+            );
+            break;
+
+          case "Sign in to your Microsoft account":
+            await new Promise((r) => setTimeout(r, 300));
+            await tryMultipleSelectors(
+              mainWindow.webContents,
+              ["#signup", "#i0116"],
+              `document.querySelector('SELECTOR').click()`,
+            );
+            break;
+
+          case "Create account": {
+            const numbers = new Array(10)
+              .fill(0)
+              .map(() => Math.floor(Math.random() * 10))
+              .join("");
+            const letters = new Array(5)
+              .fill(0)
+              .map(() =>
+                String.fromCharCode(97 + Math.floor(Math.random() * 26)),
+              )
+              .join("");
+            const email = `${letters}${numbers}@outlook.com`;
+            currentAccount.email = email;
+            console.log("Created email:", email);
+
+            await execSafe(
+              mainWindow.webContents,
+              `(function(){ try { const el = document.querySelector('#usernameInput'); if(!el) return false; el.focus && el.focus(); el.click && el.click(); return true; } catch(e){ return false; } })()`,
+            );
+            await new Promise((r) => setTimeout(r, 150));
+            for (let i = 0; i < 30; i++) {
+              mainWindow.webContents.sendInputEvent({
+                type: "keyDown",
+                keyCode: "Backspace",
+              });
+              mainWindow.webContents.sendInputEvent({
+                type: "keyUp",
+                keyCode: "Backspace",
+              });
+            }
+            for (const ch of email) {
+              mainWindow.webContents.sendInputEvent({
+                type: "char",
+                keyCode: ch,
+              });
+            }
+            await new Promise((r) => setTimeout(r, 150));
+            await execSafe(
+              mainWindow.webContents,
+              `(function(){ try { const btn = document.querySelector('#nextButton'); if(!btn) return false; btn.click && btn.click(); return true; } catch(e){ return false; } })()`,
+            );
+            console.log("Submitted email");
+            break;
+          }
+
+          case "Create a password": {
+            if (elementInfo && elementInfo.suggested) {
+              try {
+                persistSelector("Create a password", elementInfo.suggested);
+                persistedSelectors["Create a password"] = elementInfo.suggested;
+              } catch (err) {
+                console.warn(
+                  "Persist selector error:",
+                  err && err.message ? err.message : err,
+                );
+              }
+            }
+
+            const password = [2, 2, 2, 2]
+              .map((len, idx) => {
+                if (idx === 0)
+                  return new Array(len)
+                    .fill(0)
+                    .map(() =>
+                      String.fromCharCode(97 + Math.floor(Math.random() * 26)),
+                    )
+                    .join("");
+                if (idx === 1)
+                  return new Array(len)
+                    .fill(0)
+                    .map(() =>
+                      String.fromCharCode(65 + Math.floor(Math.random() * 26)),
+                    )
+                    .join("");
+                if (idx === 2)
+                  return new Array(len)
+                    .fill(0)
+                    .map(() => `${Math.floor(Math.random() * 10)}`)
+                    .join("");
+                return new Array(len)
+                  .fill(0)
+                  .map(() =>
+                    String.fromCharCode(33 + Math.floor(Math.random() * 15)),
+                  )
+                  .join("");
+              })
+              .join("");
+            currentAccount.password = password;
+            console.log("Created password:", password);
+
+            const persistedSel =
+              persistedSelectors["Create a password"] ||
+              "#Password" ||
+              "input[type=password]";
+
+            const fillAttemptScript = `(async function(){
+              try {
+                const sel = ${JSON.stringify(persistedSel)};
+                const val = ${JSON.stringify(password)};
+                const start = Date.now();
+                function setNativeValue(el, v) {
+                  try {
+                    const desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+                    if (desc && desc.set) {
+                      desc.set.call(el, v);
+                    } else {
+                      el.value = v;
+                    }
+                    try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch(e){}
+                    try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch(e){}
+                  } catch(e){}
+                }
+                while (Date.now() - start < 600) {
+                  const el = document.querySelector(sel);
+                  if (el) {
+                    try {
+                      el.focus && el.focus();
+                      setNativeValue(el, val);
+                    } catch(e){}
+                    return true;
+                  }
+                  await new Promise(r => setTimeout(r, 40));
+                }
+                return false;
+              } catch(e) { return false; }
+            })()`;
+
+            let filled = false;
+            try {
+              filled =
+                !!(await mainWindow.webContents.executeJavaScript(
+                  fillAttemptScript,
+                ));
+            } catch (err) {
+              console.warn(
+                "fast fill script failed:",
+                err && err.message ? err.message : err,
+              );
+              filled = false;
+            }
+
+            if (!filled) {
+              console.log(
+                "Fast fill did not find element; injecting MutationObserver as a faster background fill",
+              );
+
+              const observerScript = `(function(){
+                try {
+                  const sel = ${JSON.stringify(persistedSel)};
+                  const val = ${JSON.stringify(password)};
+                  let done = false;
+                  function setNativeValue(el, v) {
+                    try {
+                      const desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+                      if (desc && desc.set) {
+                        desc.set.call(el, v);
+                      } else {
+                        el.value = v;
+                      }
+                      try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch(e){}
+                      try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch(e){}
+                    } catch(e){}
+                  }
+                  function tryFill() {
+                    if (done) return false;
+                    try {
+                      const el = document.querySelector(sel);
+                      if (el) {
+                        try {
+                          el.focus && el.focus();
+                          setNativeValue(el, val);
+                        } catch(e){}
+                        done = true;
+                        return true;
+                      }
+                    } catch(e){}
+                    return false;
+                  }
+                  // try immediately in case element is already present
+                  if (tryFill()) return true;
+                  const observer = new MutationObserver(function(mutations){
+                    if (tryFill()) {
+                      try { observer.disconnect(); } catch(e){}
+                    }
+                  });
+                  observer.observe(document.documentElement || document.body, { childList: true, subtree: true });
+                  // fallback timer to stop observing if nothing appears in 4s
+                  setTimeout(function(){ try { observer.disconnect(); } catch(e){} }, 4000);
+                  return true;
+                } catch(e) { return false; }
+              })();`;
+              try {
+                await execSafe(mainWindow.webContents, observerScript);
+              } catch (err) {
+                console.warn(
+                  "MutationObserver injection failed:",
+                  err && err.message ? err.message : err,
+                );
+              }
+
+              await new Promise((r) => setTimeout(r, 300));
+
+              try {
+                const finalValue = await execSafe(
+                  mainWindow.webContents,
+                  `(function(){ try { const el = document.querySelector(${JSON.stringify(persistedSel)}); return el ? el.value : null; } catch(e){ return null; } })()`,
+                );
+                if (finalValue && finalValue.trim() !== "") {
+                  filled = true;
+                }
+              } catch (err) {
+              }
+            }
+
+            if (!filled) {
+              console.log(
+                "Observer did not fill the field; falling back to typing approach",
+              );
+              await waitForElementAndExecute(
+                mainWindow.webContents,
+                persistedSel,
+                `(function(){ const el = document.querySelector(${JSON.stringify(persistedSel)}); if(!el) return false; try{ el.focus(); el.click(); } catch(e){} return true; })()`,
+                6,
+              );
+              for (let i = 0; i < 30; i++) {
+                mainWindow.webContents.sendInputEvent({
+                  type: "keyDown",
+                  keyCode: "Backspace",
+                });
+                mainWindow.webContents.sendInputEvent({
+                  type: "keyUp",
+                  keyCode: "Backspace",
+                });
+              }
+              for (const ch of password) {
+                mainWindow.webContents.sendInputEvent({
+                  type: "char",
+                  keyCode: ch,
+                });
+                await new Promise((r) => setTimeout(r, 25));
+              }
+            }
+
+            await new Promise((r) => setTimeout(r, 180));
+            try {
+              const finalValue = await execSafe(
+                mainWindow.webContents,
+                `(function(){ try { const el = document.querySelector(${JSON.stringify(persistedSel)}); return el ? el.value : null; } catch(e){ return null; } })()`,
+              );
+              console.log(
+                "Final password value before Next:",
+                finalValue ? "[HIDDEN]" : "EMPTY",
+              );
+            } catch (err) {
+              console.warn(
+                "Could not read final password value:",
+                err && err.message ? err.message : err,
+              );
+            }
+
+            await waitForElementAndExecute(
+              mainWindow.webContents,
+              "#nextButton",
+              `(function(){ const btn = document.querySelector('#nextButton'); if(!btn) return false; try{ btn.click(); } catch(e){} return true; })()`,
+              4,
+            );
+            break;
+          }
+
+          case "What's your name?": {
+            console.log(
+              "Name page detected - inspecting DOM and filling names",
+            );
+            await inspectDOM(mainWindow.webContents);
+
+            const firstNames = [
+              "Alex",
+              "Jordan",
+              "Taylor",
+              "Casey",
+              "Riley",
+              "Morgan",
+              "Avery",
+              "Quinn",
+              "Sage",
+              "River",
+              "Ichigo"
+            ];
+            const lastNames = [
+              "Smith",
+              "Johnson",
+              "Brown",
+              "Davis",
+              "Miller",
+              "Wilson",
+              "Moore",
+              "Taylor",
+              "Anderson",
+              "Thomas",
+              "Kurosaki"
+            ];
+            const first =
+              firstNames[Math.floor(Math.random() * firstNames.length)];
+            const last =
+              lastNames[Math.floor(Math.random() * lastNames.length)];
+            console.log("Generated names:", first, last);
+
+            await waitForElementAndExecute(
+              mainWindow.webContents,
+              "#firstNameInput",
+              `(function(){ const el = document.querySelector('#firstNameInput'); if(!el) return false; try{ el.focus(); el.click(); }catch(e){} return true; })()`,
+              4,
+            );
+            await new Promise((r) => setTimeout(r, 180));
+            for (let i = 0; i < 15; i++) {
+              mainWindow.webContents.sendInputEvent({
+                type: "keyDown",
+                keyCode: "Backspace",
+              });
+              mainWindow.webContents.sendInputEvent({
+                type: "keyUp",
+                keyCode: "Backspace",
+              });
+            }
+            for (const ch of first) {
+              mainWindow.webContents.sendInputEvent({
+                type: "char",
+                keyCode: ch,
+              });
+              await new Promise((r) => setTimeout(r, 30));
+            }
+            await new Promise((r) => setTimeout(r, 180));
+            mainWindow.webContents.sendInputEvent({
+              type: "keyDown",
+              keyCode: "Tab",
+            });
+            mainWindow.webContents.sendInputEvent({
+              type: "keyUp",
+              keyCode: "Tab",
+            });
+            await new Promise((r) => setTimeout(r, 120));
+            for (const ch of last) {
+              mainWindow.webContents.sendInputEvent({
+                type: "char",
+                keyCode: ch,
+              });
+              await new Promise((r) => setTimeout(r, 30));
+            }
+            await new Promise((r) => setTimeout(r, 200));
+            mainWindow.webContents.sendInputEvent({
+              type: "keyDown",
+              keyCode: "Return",
+            });
+            mainWindow.webContents.sendInputEvent({
+              type: "keyUp",
+              keyCode: "Return",
+            });
+            await new Promise((r) => setTimeout(r, 400));
+            await waitForElementAndExecute(
+              mainWindow.webContents,
+              "#nextButton",
+              `document.querySelector('#nextButton').click()`,
+              4,
+            );
+            break;
+          }
+
+          case "What's your date of birth?": {
+            await tryMultipleSelectors(
+              mainWindow.webContents,
+              ["#BirthMonth", "#BirthMonth_DropDown"],
+              `document.querySelector('SELECTOR').value = "${Math.max(1, Math.floor(Math.random() * 12))}";`,
+            );
+            await new Promise((r) => setTimeout(r, 180));
+            await tryMultipleSelectors(
+              mainWindow.webContents,
+              ["#BirthMonth", "#BirthMonth_DropDown"],
+              `document.querySelector('SELECTOR').dispatchEvent(new Event("change"));`,
+            );
+            await new Promise((r) => setTimeout(r, 240));
+            await tryMultipleSelectors(
+              mainWindow.webContents,
+              ["#BirthDay", "#BirthDay_DropDown"],
+              `document.querySelector('SELECTOR').value = "${Math.max(1, Math.floor(Math.random() * 15))}";`,
+            );
+            await new Promise((r) => setTimeout(r, 160));
+            await tryMultipleSelectors(
+              mainWindow.webContents,
+              ["#BirthDay", "#BirthDay_DropDown"],
+              `document.querySelector('SELECTOR').dispatchEvent(new Event("change"));`,
+            );
+            await new Promise((r) => setTimeout(r, 200));
+            await tryMultipleSelectors(
+              mainWindow.webContents,
+              ["#BirthYear", "#BirthYear_DropDown"],
+              `document.querySelector('SELECTOR').value = "1995";`,
+            );
+            await new Promise((r) => setTimeout(r, 160));
+            await tryMultipleSelectors(
+              mainWindow.webContents,
+              ["#BirthYear", "#BirthYear_DropDown"],
+              `document.querySelector('SELECTOR').dispatchEvent(new Event("input"));`,
+            );
+            await new Promise((r) => setTimeout(r, 300));
+            await waitForElementAndExecute(
+              mainWindow.webContents,
+              "#nextButton",
+              `document.querySelector('#nextButton').click()`,
+              4,
+            );
+            break;
+          }
+
+          case "Microsoft account notice": {
+            await new Promise((r) => setTimeout(r, 200));
+            await tryMultipleSelectors(
+              mainWindow.webContents,
+              ["#StickyFooter > button", "#idSubmit_SAOTCS_Confirm"],
+              `document.querySelector('SELECTOR').click()`,
+            );
+            break;
+          }
+
+          case "Welcome to Xbox": {
+            appendFileSync(
+              ACCOUNTS_FILE,
+              `${currentAccount.email}:${currentAccount.password}\n`,
+            );
+            console.log(
+              "Account created:",
+              `${currentAccount.email}:${currentAccount.password}`,
+            );
+            await new Promise((r) => setTimeout(r, 300));
+            await tryMultipleSelectors(
+              mainWindow.webContents,
+              [
+                "#create-account-gamertag-suggestion-1",
+                "#create-account-gamertag-suggestion-2",
+              ],
+              `document.querySelector('SELECTOR').click()`,
+            );
+            await new Promise((r) => setTimeout(r, 300));
+            await tryMultipleSelectors(
+              mainWindow.webContents,
+              ["#inline-continue-control", "#idSubmit_SAOTCS_Confirm"],
+              `document.querySelector('SELECTOR').click()`,
+            );
+            break;
+          }
+
+          case "Consent": {
+            await tryMultipleSelectors(
+              mainWindow.webContents,
+              ["#inline-continue-control", "#idSubmit_SAOTCS_Confirm"],
+              `document.querySelector('SELECTOR').click()`,
+            );
+            break;
+          }
+
+          default:
+            console.log("Unhandled page:", title);
+            break;
+        }
+      } catch (err) {
+        console.error(
+          "Main loop error:",
+          err && err.message ? err.message : err,
+        );
+      }
+    }, 120);
+  });
+})().catch((err) => {
+  console.error("Application error:", err && err.message ? err.message : err);
+});
