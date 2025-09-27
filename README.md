@@ -6,7 +6,7 @@ You can however make a pull request if you would like to contribute to the tool,
 
 ## What is this tool?
 
-This tool (made with Electron) is a simple JavaScript tool which automates the process of creation Xbox Accounts through the Microsoft website, it then stores all the tokens of the accounts it creates into a .txt file which can then be used elsewhere which require these tokens to function, tools like **[Xbox Follower Bots](https://github.com/playfairs/XBL-Follower-Bot)**
+This tool (made with Electron) is a simple JavaScript tool which automates the process of creation Xbox Accounts through the Microsoft website, it then stores all the tokens of the accounts it creates into a .txt file which can then be used elsewhere which require these tokens to function, tools like **[Xbox Follower Bot](https://github.com/playfairs/XBL-Follower-Bot)**
 
 >[!NOTE]
 In order for this tool to work you must have the following installed
