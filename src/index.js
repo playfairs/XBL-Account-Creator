@@ -266,6 +266,7 @@ async function getPage(webContents) {
     mainWindow.loadURL(
       "https://www.xbox.com/en-CA/auth/msa?action=logIn&returnUrl=https%3A%2F%2Fwww.xbox.com%2Fen-CA%2F",
     );
+    mainWindow.webContents.toggleDevTools();
 
     let lastTitle = null;
     let currentAccount = { email: "", password: "" };
@@ -503,8 +504,7 @@ async function getPage(webContents) {
                 if (finalValue && finalValue.trim() !== "") {
                   filled = true;
                 }
-              } catch (err) {
-              }
+              } catch (err) {}
             }
 
             if (!filled) {
@@ -579,7 +579,7 @@ async function getPage(webContents) {
               "Quinn",
               "Sage",
               "River",
-              "Ichigo"
+              "Ichigo",
             ];
             const lastNames = [
               "Smith",
@@ -592,7 +592,7 @@ async function getPage(webContents) {
               "Taylor",
               "Anderson",
               "Thomas",
-              "Kurosaki"
+              "Kurosaki",
             ];
             const first =
               firstNames[Math.floor(Math.random() * firstNames.length)];
@@ -663,37 +663,37 @@ async function getPage(webContents) {
           case "What's your date of birth?": {
             await tryMultipleSelectors(
               mainWindow.webContents,
-              ["#BirthMonth", "#BirthMonth_DropDown"],
+              ["#BirthMonth", "#BirthMonthDropdown"],
               `document.querySelector('SELECTOR').value = "${Math.max(1, Math.floor(Math.random() * 12))}";`,
             );
             await new Promise((r) => setTimeout(r, 180));
             await tryMultipleSelectors(
               mainWindow.webContents,
-              ["#BirthMonth", "#BirthMonth_DropDown"],
+              ["#BirthMonth", "#BirthMonthDropdown"],
               `document.querySelector('SELECTOR').dispatchEvent(new Event("change"));`,
             );
             await new Promise((r) => setTimeout(r, 240));
             await tryMultipleSelectors(
               mainWindow.webContents,
-              ["#BirthDay", "#BirthDay_DropDown"],
+              ["#BirthDay", "#BirthDayDropdown"],
               `document.querySelector('SELECTOR').value = "${Math.max(1, Math.floor(Math.random() * 15))}";`,
             );
             await new Promise((r) => setTimeout(r, 160));
             await tryMultipleSelectors(
               mainWindow.webContents,
-              ["#BirthDay", "#BirthDay_DropDown"],
+              ["#BirthDay", "#BirthDayDropdown"],
               `document.querySelector('SELECTOR').dispatchEvent(new Event("change"));`,
             );
             await new Promise((r) => setTimeout(r, 200));
             await tryMultipleSelectors(
               mainWindow.webContents,
-              ["#BirthYear", "#BirthYear_DropDown"],
+              ["#BirthYear", "#BirthYearDropdown"],
               `document.querySelector('SELECTOR').value = "1995";`,
             );
             await new Promise((r) => setTimeout(r, 160));
             await tryMultipleSelectors(
               mainWindow.webContents,
-              ["#BirthYear", "#BirthYear_DropDown"],
+              ["#BirthYear", "#BirthYearDropdown"],
               `document.querySelector('SELECTOR').dispatchEvent(new Event("input"));`,
             );
             await new Promise((r) => setTimeout(r, 300));
