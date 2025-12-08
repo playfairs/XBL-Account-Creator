@@ -164,9 +164,89 @@ async function inspectDOM(webContents) {
   }
 }
 
+// Function to simulate human-like typing with realistic delays
+async function simulateTyping(webContents, selector, text, delay = 50) {
+  // Click the input first to focus it
+  await webContents.executeJavaScript(`
+    (function() {
+      const el = document.querySelector('${selector}');
+      if (el) {
+        el.click();
+        return true;
+      }
+      return false;
+    })()
+  `);
+  
+  // Type each character with a small random delay
+  for (const char of text) {
+    await new Promise(resolve => setTimeout(resolve, delay + Math.random() * 50));
+    await webContents.executeJavaScript(`
+      (function() {
+        const el = document.querySelector('${selector}');
+        if (el) {
+          // Create and dispatch input event
+          const inputEvent = new Event('input', { bubbles: true });
+          el.value += '${char}';
+          el.dispatchEvent(inputEvent);
+          
+          // Also trigger keydown, keypress, and keyup events
+          const keyEvent = new KeyboardEvent('keydown', {
+            key: '${char}',
+            keyCode: '${char}'.charCodeAt(0),
+            which: '${char}'.charCodeAt(0),
+            code: 'Key${char.toUpperCase()}',
+            keyIdentifier: 'U+${'${char}'.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}',
+            bubbles: true,
+            cancelable: true
+          });
+          el.dispatchEvent(keyEvent);
+          
+          const keyPressEvent = new KeyboardEvent('keypress', {
+            key: '${char}',
+            keyCode: '${char}'.charCodeAt(0),
+            which: '${char}'.charCodeAt(0),
+            charCode: '${char}'.charCodeAt(0),
+            bubbles: true,
+            cancelable: true
+          });
+          el.dispatchEvent(keyPressEvent);
+          
+          const keyUpEvent = new KeyboardEvent('keyup', {
+            key: '${char}',
+            keyCode: '${char}'.charCodeAt(0),
+            which: '${char}'.charCodeAt(0),
+            code: 'Key${char.toUpperCase()}',
+            bubbles: true,
+            cancelable: true
+          });
+          el.dispatchEvent(keyUpEvent);
+          
+          return true;
+        }
+        return false;
+      })()
+    `);
+  }
+  
+  // Trigger change event after typing is done
+  await webContents.executeJavaScript(`
+    (function() {
+      const el = document.querySelector('${selector}');
+      if (el) {
+        const changeEvent = new Event('change', { bubbles: true });
+        el.dispatchEvent(changeEvent);
+        return true;
+      }
+      return false;
+    })()
+  `);
+}
+
 const PAGE_MAP = {
   "Sign in to your Microsoft account": "#usernameTitle",
   "Create a password": "input[type=password]",
+  "Date of birth": ["#BirthMonth", "#BirthDay", "#BirthYear"],
   "What's your name?": [
     "input[placeholder*='First name']",
     "input[placeholder*='first name']",
@@ -336,6 +416,37 @@ async function getPage(webContents) {
               `(function(){ try { const btn = document.querySelector('#nextButton'); if(!btn) return false; btn.click && btn.click(); return true; } catch(e){ return false; } })()`,
             );
             console.log("Submitted email");
+            break;
+          }
+
+          case "Date of birth": {
+            const currentYear = new Date().getFullYear();
+            const birthYear = Math.floor(Math.random() * (currentYear - 18 - (currentYear - 65) + 1)) + (currentYear - 65);
+            const birthMonth = String(Math.floor(Math.random() * 12) + 1).padStart(2, '0');
+            const birthDay = String(Math.floor(Math.random() * 28) + 1).padStart(2, '0');
+            await simulateTyping(mainWindow.webContents, '#BirthMonth', birthMonth);
+            await new Promise(r => setTimeout(r, 300 + Math.random() * 500));
+            await simulateTyping(mainWindow.webContents, '#BirthDay', birthDay);
+            await new Promise(r => setTimeout(r, 300 + Math.random() * 500));
+            await simulateTyping(mainWindow.webContents, '#BirthYear', birthYear.toString());
+            await new Promise(r => setTimeout(r, 300 + Math.random() * 500));
+            await execSafe(
+              mainWindow.webContents,
+              `(function(){
+                try {
+                  const btn = document.querySelector('input[type="submit"], button[type="submit"], #idSIButton9, #idA_PWD_ForgotPassword, #idA_IL_ForgotPassword0, #idA_IL_SignInAnotherWay, #idA_SignUpNow, #idA_Nevermind, #idA_BackToSignin, #idA_BackToSigninLink, #idA_BackToProofs, #idA_BackToProofsLink, #idA_BackToPhoneVerification, #idA_BackToPhoneVerificationLink, #idA_BackToEmailVerification, #idA_BackToEmailVerificationLink, #idA_BackToPhoneFactorVerification, #idA_BackToPhoneFactorVerificationLink, #idA_BackToEmailFactorVerification, #idA_BackToEmailFactorVerificationLink, #idA_BackToPhoneFactor, #idA_BackToPhoneFactorLink, #idA_BackToEmailFactor, #idA_BackToEmailFactorLink, #idA_BackToPhoneFactorVerification, #idA_BackToPhoneFactorVerificationLink, #idA_BackToEmailFactorVerification, #idA_BackToEmailFactorVerificationLink, #idA_BackToPhoneFactor, #idA_BackToPhoneFactorLink, #idA_BackToEmailFactor, #idA_BackToEmailFactorLink, #idA_BackToPhoneVerification, #idA_BackToPhoneVerificationLink, #idA_BackToEmailVerification, #idA_BackToEmailVerificationLink, #idA_BackToProofs, #idA_BackToProofsLink, #idA_BackToSignin, #idA_BackToSigninLink, #idA_Nevermind, #idA_SignUpNow, #idA_IL_SignInAnotherWay, #idA_IL_ForgotPassword0, #idA_PWD_ForgotPassword, #idSIButton9');
+                  if (btn) {
+                    btn.click();
+                    return true;
+                  }
+                  return false;
+                } catch (e) {
+                  console.error('Error clicking next button:', e);
+                  return false;
+                }
+              })()`
+            );
+            console.log("Submitted date of birth");
             break;
           }
 
